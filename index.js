@@ -1,5 +1,25 @@
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
+const fs = require('fs');
+const path = require('path');
+
+const DB_FILE = path.join(__dirname, 'gastos.json');
+
+// Função para salvar a despesa no arquivo JSON local
+function salvarDespesa(novaDespesa) {
+    try {
+        let dadosAtuais = [];
+        if (fs.existsSync(DB_FILE)) {
+            const arquivoConteudo = fs.readFileSync(DB_FILE, 'utf8');
+            dadosAtuais = JSON.parse(arquivoConteudo);
+        }
+        dadosAtuais.push(novaDespesa);
+        fs.writeFileSync(DB_FILE, JSON.stringify(dadosAtuais, null, 2), 'utf8');
+        console.log('💾 Despesa salva com sucesso no banco local (gastos.json)!');
+    } catch (error) {
+        console.error('❌ Erro ao salvar a despesa:', error);
+    }
+}
 
 // Função para extrair os dados do template de gastos enviado no WhatsApp
 function parseExpenseMessage(text) {
@@ -11,7 +31,7 @@ function parseExpenseMessage(text) {
             const parts = line.split(':');
             if (parts.length >= 2) {
                 const key = parts[0].trim().toLowerCase();
-                const value = parts.slice(1).join(':').trim(); // Trata caso haja dois pontos no valor
+                const value = parts.slice(1).join(':').trim();
 
                 if (key.includes('item')) data.item = value;
                 if (key.includes('valor')) data.valor = parseFloat(value.replace('R$', '').trim().replace(',', '.'));
@@ -20,9 +40,8 @@ function parseExpenseMessage(text) {
             }
         });
 
-        // Adiciona carimbo de metadados automático
         data.timestamp = new Date().toISOString();
-        data.autor = "M&L Finanças Bot";
+        data.id = Date.now().toString(); // ID único para cada gasto
 
         return data;
     } catch (error) {
@@ -32,7 +51,6 @@ function parseExpenseMessage(text) {
 }
 
 async function connectToWhatsApp() {
-    // 1. Gerencia a sessão e o QR Code localmente
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
     const sock = makeWASocket({
@@ -40,10 +58,8 @@ async function connectToWhatsApp() {
         auth: state
     });
 
-    // 2. Salva as credenciais sempre que houver atualização
     sock.ev.on('creds.update', saveCreds);
 
-    // 3. Monitora o status da conexão
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect } = update;
         if (connection === 'close') {
@@ -57,7 +73,6 @@ async function connectToWhatsApp() {
         }
     });
 
-    // 4. Escuta as mensagens recebidas em tempo real
     sock.ev.on('messages.upsert', async ({ messages }) => {
         const m = messages[0];
         if (!m.message || m.key.fromMe) return;
@@ -65,17 +80,22 @@ async function connectToWhatsApp() {
         const messageText = m.message.conversation || m.message.extendedTextMessage?.text;
         if (!messageText) return;
 
-        // Verifica se a mensagem contém o template de controle de gastos
         if (messageText.includes('*Controle de Gastos*')) {
             console.log('📥 Nova despesa detectada no chat!');
             
             const despesaProcessada = parseExpenseMessage(messageText);
-            console.log('📊 Dados extraídos:', despesaProcessada);
             
-            // Responde no chat confirmando o recebimento e a leitura correta
-            await sock.sendMessage(m.key.remoteJid, { 
-                text: `✅ Gasto processado com sucesso!\n📌 Item: ${despesaProcessada.item || 'Não identificado'}\n💰 Valor: R$ ${despesaProcessada.valor || '0.00'}` 
-            });
+            if (despesaProcessada && despesaProcessada.item) {
+                salvarDespesa(despesaProcessada);
+                
+                await sock.sendMessage(m.key.remoteJid, { 
+                    text: `✅ Gasto processado e salvo!\n📌 Item: ${despesaProcessada.item}\n💰 Valor: R$ ${despesaProcessada.valor || '0.00'}\n👤 Conta: ${despesaProcessada.conta || 'Não informada'}` 
+                });
+            } else {
+                await sock.sendMessage(m.key.remoteJid, { 
+                    text: `⚠️ Não consegui entender todos os campos. Verifique o formato do *Controle de Gastos*.` 
+                });
+            }
         }
     });
 }
